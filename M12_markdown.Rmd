@@ -1,0 +1,215 @@
+---
+title: "HealthStats: Function Documentation"
+author: "Nora Delgado"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: html_document
+---
+
+> **My Package:** `HealthStats`  
+> **Dataset:** Personal wellness tracker (sleep, steps, heart‑rate, nutrition, stress, environment, mood)
+
+---
+  
+## Why I’m Building *HealthStats*
+I am passionate abaout personal wellnes and healthy lifestyle and I wonder if simple stats about daily habits could show how those habits link to someone's mood. Turning that idea into a mini‑R package felt like a good final‑project challenge.  `HealthStats` will:  
+ - Clean the raw wellness sheet,  
+ - Summarise the key health factors,  
+ - Compare those factors by mood,  
+ - Predict mood with a logistic model, and  
+ - Show one daily "health score" so I can see good‑days vs bad‑days at a glance.
+
+Everything below documents the **five core functions** my package will have. 
+---
+  
+## Function #1 `clean_wellness_data()`
+### Purpose
+Make the raw sheet analysis‑ready by:
+* dropping rows with essential NAs,
+* standardising column names to snake case, and
+* coercing character columns to factors.
+
+### Implementation
+```{r clean-fn}
+
+clean_wellness_data <- function(input_path,
+                                output_path = "wellness_data_cleaned.csv") {
+
+# Load packages
+  library(tidyverse)
+  library(janitor)     
+  
+# Read data
+  df <- read_csv(input_path, show_col_types = FALSE) %>% 
+    clean_names()  # snake_case, strip weird chars
+  
+  # Split "systolic/diastolic" into two numeric cols
+  df <- df %>% 
+    separate(
+      col   = systolic_and_diastolic_blood_pressure,
+      into  = c("systolic_bp", "diastolic_bp"),
+      sep   = "/",
+      convert = TRUE,  
+      remove  = TRUE
+    )
+  
+  # Extract water (liters) & steps from text column
+  # Regex finds "X liters" and "Y steps"
+  df <- df %>% 
+    mutate(
+      water_liters = str_extract(
+        additional_health_indicators_e_g_water_levels_steps,
+        "[0-9.]+(?=\\s*liters?)"
+      ) %>% as.numeric(),
+      
+      steps = str_extract(
+        additional_health_indicators_e_g_water_levels_steps,
+        "[0-9,]+(?=\\s*steps?)"
+      ) %>% str_remove_all(",") %>% as.integer()
+    ) %>% 
+    select(-additional_health_indicators_e_g_water_levels_steps)  # drop original
+  
+  # Standardize text columns to lowercase / trimmed
+  cat_cols <- c(
+    "bmi_category",
+    "quality_or_frequency_of_social_interactions",
+    "activities_for_mental_health_such_as_therapy_sessions_or_meditation",
+    "environmental_aspects_such_as_weather_and_air_quality",
+    "lifestyle_decisions_such_as_drinking_and_smoking",
+    "mood_output"
+  )
+  
+  df <- df %>% 
+    mutate(across(all_of(cat_cols), ~ str_trim(str_to_lower(.x))))
+  
+  # Ensure numeric columns really are numeric
+  num_cols <- c(
+    "duration_of_sleep_hours",
+    "level_of_physical_activity_minutes_per_day",
+    "level_of_stress_scale_1_10",
+    "heart_rate_bpm",
+    "level_of_workload_scale_1_10",
+    "systolic_bp",
+    "diastolic_bp",
+    "water_liters",
+    "steps"
+  )
+  
+  df <- df %>% 
+    mutate(across(all_of(num_cols), as.numeric))
+  
+  # Remove duplicates & rows missing critical vitals
+  df <- df %>% 
+    distinct() %>% 
+    drop_na(duration_of_sleep_hours, heart_rate_bpm,
+            systolic_bp, diastolic_bp)
+  
+  # Write cleaned dataset
+  write_csv(df, output_path)
+  
+  message("Cleaned dataset written to: ", normalizePath(output_path))
+  return(df)
+}
+
+```
+
+### Example
+```{r clean-example}
+clean_data <- clean_wellness_data("C:/Users/norae/Downloads/wellness_data.csv")  
+head(clean_data)
+```
+
+---
+  
+## Function #2 `summarize_health_factors()`
+### Purpose
+Quick numeric snapshot: average sleep, steps, heart‑rate, and water per day.
+
+### Implementation
+```{r summary-fn}
+summarize_health_factors <- function(df) {
+  df %>%
+    summarize(
+      avg_sleep       = mean(duration_of_sleep_hours),
+      avg_steps       = mean(steps),
+      avg_heart_rate  = mean(heart_rate_bpm),
+      avg_water_intake= mean(water_liters)
+    )
+}
+```
+
+### Example
+```{r summary-example}
+summarize_health_factors(clean_data)
+```
+
+---
+  
+## Function #3 `summarize_by_mood()`
+### Purpose
+Show how habits shift across moods (Happy, Neutral, Sad).
+
+### Implementation
+```{r bymood-fn}
+summarize_by_mood <- function(df) {
+  df %>%
+    group_by(mood_output) %>%
+    summarize(
+      avg_sleep = mean(duration_of_sleep_hours),
+      avg_steps = mean(steps),
+      avg_stress= mean(level_of_stress_scale_1_10),
+      .groups = 'drop'
+    )
+}
+```
+
+### Example
+```{r bymood-example}
+summarize_by_mood(clean_data)
+```
+
+---
+  
+## Function #4 `predict_mood()`
+### Purpose
+A first‑cut logistic regression that guesses *Sad* vs *Not Sad* mood from sleep, steps, and stress.
+
+### Implementation
+```{r predict-fn}
+predict_mood <- function(df) {
+  df2 <- df %>%
+    mutate(mood_binary = ifelse(mood_output == 'Sad', 1, 0))
+  glm(mood_binary ~ duration_of_sleep_hours + steps + level_of_stress_scale_1_10,
+      data   = df2,
+      family = binomial)
+}
+```
+
+### Example
+```{r predict-example}
+model <- predict_mood(clean_data)
+summary(model)
+```
+
+---
+  
+## Function #5 `health_score()`
+### Purpose
+Roll sleep, steps, and water into one 0‑to‑1 daily score (weights: 40‑30‑30).
+
+### Implementation
+```{r score-fn}
+health_score <- function(df) {
+  df %>%
+    mutate(
+      health_score = 0.4 * (duration_of_sleep_hours / 8) +
+        0.3 * (steps / 10000) +
+        0.3 * (water_liters / 8)
+    )
+}
+
+```
+
+### Example
+```{r score-example}
+health_score(clean_data)
+```
